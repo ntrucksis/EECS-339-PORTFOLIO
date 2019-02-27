@@ -484,6 +484,9 @@ if ($action eq "near") {
   }
 }
 
+#
+# User can add a new portfolio to their list of portfolios
+#
 if ($action eq "add-port") {
   if (!$run) {
     print start_form(-name=>'add-port'),
@@ -509,18 +512,83 @@ if ($action eq "add-port") {
   }      
 }
 
+#
+# This is the pageview that allows a user to see one of their portfolios
+#
 if ($action eq "portfolio") {
   my $portfolio = param('key');
   if (defined($portfolio)) {
     if (ValidPort($portfolio, $user)) {
-      print "<h1> Portfolio: $portfolio</h1><p>Cash Account: 0 (this is static rn)</p><br/><br/>";
+      my ($balance, $error) = GetBalance($portfolio, $user);
+      print "<h1> Portfolio: $portfolio</h1>";
+      if ($error) {
+        print "There was an error getting your cash account balance.";
+      } else {
+        print "<p>Cash Account: \$$balance</p>";
+      }
+      print "<a href=\"portf.pl?act=account-transaction&key=$portfolio\"><p>Deposit/Withdraw</p></a>
+             <br/><br/>";
       print "<h2> Stock Holdings </h2>";
       print "<p> Once the stock holdings stuff is implemented this is where users can see their holdings </p>";
     } else {
-      print "$portfolio is not a valid portfolio. Make sure you are signed in.";
+      print "$portfolio is not a valid portfolio. Make sure you are signed in and that it actually exists.";
     }
   } else {
     print "No portfolio was selected. Make sure you are signed in and click on a portfolio through the home page";
+  }
+}
+
+#
+# This is the pageview that allows a user to deposit or withdraw from a cash account in their portfolio
+#
+if ($action eq "account-transaction") {
+  my $portfolio = param('key');
+  if (defined($portfolio)) {   
+    if (ValidPort($portfolio, $user) && !$run) {
+      my ($balance, $error) = GetBalance($portfolio, $user);
+      print "<h2> You are transacting with your \"$portfolio\" portfolio</h2>";
+      if ($error) {
+        print "There was a problem getting your balance.";
+      } 
+
+else {
+	print "<p> Your current balance is: \$$balance</p> ";
+	print start_form(-name=>'account-transaction'),
+          h2('Deposit to your portfolio account'),
+          "Amount: ",textfield(-name=>'amount'),p,
+          hidden(-name=>'act',default=>['account-transaction']),
+          hidden(-name=>'run',default=>['1']),
+          hidden(-name=>'trans-type',default=>['deposit']),
+          hidden(-name=>'key',default=>[$portfolio]),
+          submit,
+          end_form;
+        print start_form(-name=>'account-transaction'),
+          h2('Withdraw from your portfolio account'),
+          "Amount: ",textfield(-name=>'amount'),p,
+          hidden(-name=>'act',default=>['account-transaction']),
+          hidden(-name=>'run',default=>['1']),
+          hidden(-name=>'key',default=>[$portfolio]),
+          hidden(-name=>'trans-type',default=>['withdraw']),
+          submit,
+          end_form; 
+      }  
+    } elsif (ValidPort($portfolio, $user) && $run) {
+      my $amount = param('amount');
+      my $transType = param('trans-type');
+      if (defined($transType) && defined($amount) && $amount >= 0 && $transType eq "deposit") {
+        my $output = Deposit($portfolio,$user,$amount);
+        print $output;
+      } elsif (defined($transType) && defined($amount) && $amount >= 0 && $transType eq "withdraw") {
+        my $output = Withdraw($portfolio,$user,$amount);
+        print $output;
+      } else {
+        print "Something went wrong. Please try again and make sure you have entered an amount for your transaction.";
+      } 
+    } else {
+      print "1The portfolio cash account you are trying to access does not exist. Make sure youre logged in";
+    }
+  } else {
+    print "2The portfolio cash account you are trying to access does not exist. Make sure youre logged in";
   }
 }
 
@@ -573,7 +641,7 @@ if ($action eq "invite-user") {
   }
   print "<p><a href=\"rwb.pl?act=base&run=1\">Return</a></p>"; 
 }
-=cut
+
 
 if ($action eq "give-opinion-data") { 
   if (!UserCan($user, "give-opinion-data")){
@@ -819,7 +887,7 @@ if ($action eq "revoke-perm-user") {
   }
   print "<p><a href=\"rwb.pl?act=base&run=1\">Return</a></p>";
 }
-
+=cut
 
 
 #
@@ -1307,6 +1375,74 @@ sub GetReferrerAndPerms {
     my @permissions = split(/,/, $permissions);
     return ($referrer, @permissions, $@);
   }   
+}
+
+#
+# Get the balance of a portfolio belonging to a user
+#
+#
+sub GetBalance {
+  my ($portfolio, $owner) = @_;
+  my @rows;
+  eval { @rows = ExecSQL($dbuser,$dbpasswd, "select cash from user_portfolios where name=? and owner=?", undef, $portfolio, $owner);};
+
+  if ($@) {
+    return (undef, $@);
+  } else {
+    my $balance = @{@rows[0]}[0];  
+    return ($balance, $@);
+  } 
+}
+
+#
+# Update the portfolio with the new amount
+#
+sub UpdateCashAccount {
+  my ($portfolio, $owner, $amount) = @_;
+  eval { ExecSQL($dbuser,$dbpasswd, "update user_portfolios set cash=? where name=? and owner=?", undef, $amount, $portfolio, $owner);};  
+  return $@;
+}
+
+#
+# Make a deposit given the name of a portfolio, the owner of the portfolio, and the deposit amount
+#
+sub Deposit {
+  my ($portfolio, $owner, $amount) = @_;
+  my ($balance, $error) = GetBalance($portfolio, $owner);
+  if ($error) {
+    return "There was a problem getting your balance.";
+  } else {
+    my $newAmount = $balance + $amount;
+    my $error = UpdateCashAccount($portfolio,$user,$newAmount);
+    if ($error) {
+    return "There was an error depositing: $error";
+    } else {
+      return "You deposited $amount to \"$portfolio\". You can go back to \"$portfolio\" <a href=\"portf.pl?act=portfolio&key=$portfolio\">here</a>. *Note if you refresh the page the transaction will take place again...";
+    }
+  }
+}
+
+#
+# Make a withdraw given the name of a portfolio, the owner of the portfolio, and the withdraw amount
+#
+sub Withdraw {
+  my ($portfolio, $owner, $amount) = @_;
+  my ($balance, $error) = GetBalance($portfolio, $user);
+  if ($error) {
+    return "There was a problem getting your balance.";
+  } else {
+    my $newAmount = $balance - $amount;
+    if ($newAmount >= 0) {
+      my $error = UpdateCashAccount($portfolio,$user,$newAmount);
+      if ($error) {
+        return "There was an error performing the withdraw. Please try again.";
+      } else {
+        return "You withdrew $amount from \"$portfolio\". You can go back to \"$portfolio\" <a href=\"portf.pl?act=portfolio&key=$portfolio\">here</a>. *Note if you refresh the page the transaction will take place again...";
+      }
+    } else {
+      return "Cannot perform the withdraw. The amount you are trying to withdraw exceeds your current balance.";
+    }
+  }
 }
 
 sub DeleteFromInvites {
